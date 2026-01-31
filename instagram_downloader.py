@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import asyncio
 from urllib.parse import urlparse, parse_qs
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Instagram Video Downloader API",
     description="Download Instagram videos without cookies using multiple methods",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -42,6 +43,19 @@ app.add_middleware(
 download_dir = os.path.join(os.getcwd(), 'downloads')
 os.makedirs(download_dir, exist_ok=True)
 
+# User agents pool - rotate to avoid detection
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+]
+
+def get_random_user_agent():
+    """Get a random user agent to avoid detection"""
+    return random.choice(USER_AGENTS)
+
 def extract_instagram_shortcode(url: str) -> Optional[str]:
     """Extract Instagram shortcode from URL"""
     patterns = [
@@ -55,125 +69,13 @@ def extract_instagram_shortcode(url: str) -> Optional[str]:
             return match.group(1)
     return None
 
-def download_with_requests(url: str, shortcode: str) -> Dict[str, Any]:
+def download_with_ytdlp_enhanced(url: str, shortcode: str) -> Dict[str, Any]:
     """
-    Method 1: Direct API scraping without authentication
-    Uses Instagram's public endpoints
-    """
-    try:
-        logger.info(f"Attempting direct API method for {shortcode}")
-
-        # Instagram's public API endpoint (no auth required for public posts)
-        api_url = f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis"
-
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'X-IG-App-ID': '936619743392459',
-            'X-ASBD-ID': '198387',
-            'X-IG-WWW-Claim': '0',
-            'Origin': 'https://www.instagram.com',
-            'Referer': f'https://www.instagram.com/p/{shortcode}/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-        }
-
-        response = requests.get(api_url, headers=headers, timeout=30)
-
-        if response.status_code == 200:
-            try:
-                data = response.json()
-
-                # Navigate through the JSON structure
-                if 'items' in data and len(data['items']) > 0:
-                    media = data['items'][0]
-                elif 'graphql' in data:
-                    media = data['graphql']['shortcode_media']
-                else:
-                    return None
-
-                # Extract video URL
-                video_url = None
-                if 'video_url' in media:
-                    video_url = media['video_url']
-                elif 'video_versions' in media and len(media['video_versions']) > 0:
-                    video_url = media['video_versions'][0]['url']
-
-                if video_url:
-                    # Get caption
-                    caption = ""
-                    if 'caption' in media and media['caption']:
-                        caption = media['caption'].get('text', '')
-                    elif 'edge_media_to_caption' in media:
-                        edges = media['edge_media_to_caption'].get('edges', [])
-                        if edges:
-                            caption = edges[0]['node']['text']
-
-                    # Get author
-                    author = media.get('owner', {}).get('username', 'Unknown')
-
-                    # Download video
-                    video_response = requests.get(video_url, headers=headers, stream=True, timeout=60)
-                    if video_response.status_code == 200:
-                        filename = f"{shortcode}.mp4"
-                        filepath = os.path.join(download_dir, filename)
-
-                        with open(filepath, 'wb') as f:
-                            for chunk in video_response.iter_content(chunk_size=8192):
-                                f.write(chunk)
-
-                        logger.info(f"Successfully downloaded via direct API: {filename}")
-                        return {
-                            'success': True,
-                            'filepath': filepath,
-                            'filename': filename,
-                            'title': f'Instagram Video - {shortcode}',
-                            'author': author,
-                            'caption': caption or 'No caption available',
-                            'method': 'direct_api'
-                        }
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse JSON from direct API")
-
-    except Exception as e:
-        logger.error(f"Direct API method failed: {str(e)}")
-
-    return None
-
-def download_with_oembed(url: str, shortcode: str) -> Dict[str, Any]:
-    """
-    Method 2: Use Instagram's oEmbed endpoint (public, no auth)
+    Enhanced yt-dlp method with better headers and error handling
+    This works best on Render
     """
     try:
-        logger.info(f"Attempting oEmbed method for {shortcode}")
-
-        oembed_url = f"https://api.instagram.com/oembed/?url={url}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-
-        response = requests.get(oembed_url, headers=headers, timeout=30)
-        if response.status_code == 200:
-            data = response.json()
-
-            # oEmbed gives us metadata, we still need the video
-            # Try to extract from thumbnail or use another method
-            logger.info(f"Got oEmbed data: {data.get('title', 'No title')}")
-
-    except Exception as e:
-        logger.error(f"oEmbed method failed: {str(e)}")
-
-    return None
-
-def download_with_ytdlp_public(url: str, shortcode: str) -> Dict[str, Any]:
-    """
-    Method 3: yt-dlp with public-only settings (no cookies)
-    """
-    try:
-        logger.info(f"Attempting yt-dlp public method for {shortcode}")
+        logger.info(f"Attempting enhanced yt-dlp method for {shortcode}")
 
         ydl_opts = {
             'format': 'best',
@@ -183,11 +85,9 @@ def download_with_ytdlp_public(url: str, shortcode: str) -> Dict[str, Any]:
             'extract_flat': False,
             'nocheckcertificate': True,
             'merge_output_format': 'mp4',
-            # Don't use cookies
             'cookiefile': None,
-            # More aggressive headers
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': get_random_user_agent(),
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept-Encoding': 'gzip, deflate, br',
@@ -199,12 +99,16 @@ def download_with_ytdlp_public(url: str, shortcode: str) -> Dict[str, Any]:
                 'Sec-Fetch-Site': 'none',
                 'Cache-Control': 'max-age=0',
             },
-            # Retry settings
-            'retries': 3,
-            'fragment_retries': 3,
-            # Additional options
+            'retries': 5,
+            'fragment_retries': 5,
             'geo_bypass': True,
             'age_limit': None,
+            # Additional options to bypass restrictions
+            'extractor_args': {
+                'instagram': {
+                    'api_version': '1'
+                }
+            }
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -224,28 +128,124 @@ def download_with_ytdlp_public(url: str, shortcode: str) -> Dict[str, Any]:
                     'author': info.get('uploader', 'Unknown'),
                     'caption': info.get('description', 'No caption available'),
                     'thumbnail': info.get('thumbnail', ''),
-                    'method': 'ytdlp_public'
+                    'method': 'ytdlp_enhanced'
                 }
 
     except yt_dlp.utils.DownloadError as e:
         error_msg = str(e)
-        logger.warning(f"yt-dlp public method failed: {error_msg}")
+        logger.warning(f"Enhanced yt-dlp method failed: {error_msg}")
 
     except Exception as e:
-        logger.error(f"yt-dlp public method error: {str(e)}")
+        logger.error(f"Enhanced yt-dlp method error: {str(e)}")
+
+    return None
+
+def download_with_requests(url: str, shortcode: str) -> Dict[str, Any]:
+    """
+    Method 1: Direct API scraping without authentication
+    Uses Instagram's public endpoints with enhanced headers
+    """
+    try:
+        logger.info(f"Attempting direct API method for {shortcode}")
+
+        # Try multiple API endpoints
+        api_urls = [
+            f"https://www.instagram.com/p/{shortcode}/?__a=1&__d=dis",
+            f"https://www.instagram.com/reel/{shortcode}/?__a=1&__d=dis",
+        ]
+
+        user_agent = get_random_user_agent()
+
+        for api_url in api_urls:
+            headers = {
+                'User-Agent': user_agent,
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'X-IG-App-ID': '936619743392459',
+                'X-ASBD-ID': '198387',
+                'X-IG-WWW-Claim': '0',
+                'Origin': 'https://www.instagram.com',
+                'Referer': f'https://www.instagram.com/p/{shortcode}/',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            }
+
+            response = requests.get(api_url, headers=headers, timeout=30)
+
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+
+                    # Navigate through the JSON structure
+                    if 'items' in data and len(data['items']) > 0:
+                        media = data['items'][0]
+                    elif 'graphql' in data:
+                        media = data['graphql']['shortcode_media']
+                    else:
+                        continue
+
+                    # Extract video URL
+                    video_url = None
+                    if 'video_url' in media:
+                        video_url = media['video_url']
+                    elif 'video_versions' in media and len(media['video_versions']) > 0:
+                        video_url = media['video_versions'][0]['url']
+
+                    if video_url:
+                        # Get caption
+                        caption = ""
+                        if 'caption' in media and media['caption']:
+                            caption = media['caption'].get('text', '')
+                        elif 'edge_media_to_caption' in media:
+                            edges = media['edge_media_to_caption'].get('edges', [])
+                            if edges:
+                                caption = edges[0]['node']['text']
+
+                        # Get author
+                        author = media.get('owner', {}).get('username', 'Unknown')
+
+                        # Download video
+                        video_response = requests.get(video_url, headers=headers, stream=True, timeout=60)
+                        if video_response.status_code == 200:
+                            filename = f"{shortcode}.mp4"
+                            filepath = os.path.join(download_dir, filename)
+
+                            with open(filepath, 'wb') as f:
+                                for chunk in video_response.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+
+                            logger.info(f"Successfully downloaded via direct API: {filename}")
+                            return {
+                                'success': True,
+                                'filepath': filepath,
+                                'filename': filename,
+                                'title': f'Instagram Video - {shortcode}',
+                                'author': author,
+                                'caption': caption or 'No caption available',
+                                'method': 'direct_api'
+                            }
+                except json.JSONDecodeError:
+                    logger.warning(f"Failed to parse JSON from {api_url}")
+                    continue
+
+    except Exception as e:
+        logger.error(f"Direct API method failed: {str(e)}")
 
     return None
 
 def download_with_instaloader_like(url: str, shortcode: str) -> Dict[str, Any]:
     """
-    Method 4: Scrape HTML directly (public posts only)
+    Method 2: Scrape HTML directly (public posts only)
+    Enhanced with better headers
     """
     try:
         logger.info(f"Attempting HTML scraping for {shortcode}")
 
         post_url = f"https://www.instagram.com/p/{shortcode}/"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': get_random_user_agent(),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
             'DNT': '1',
@@ -313,8 +313,8 @@ def clean_old_downloads(max_age_hours: int = 24):
 @app.on_event("startup")
 async def startup_event():
     """Run on application startup"""
-    logger.info("Instagram Downloader API v2.0 starting up...")
-    logger.info("Cookie-less mode enabled - trying multiple methods")
+    logger.info("Instagram Downloader API v2.1 starting up...")
+    logger.info("Enhanced mode with better Render compatibility")
     clean_old_downloads()
 
 @app.post("/download")
@@ -350,12 +350,11 @@ async def download(request: Request):
 
         logger.info(f"Extracted shortcode: {shortcode}")
 
-        # Try multiple methods in order
+        # Try multiple methods in order - prioritize yt-dlp for Render
         methods = [
+            ("Enhanced yt-dlp", lambda: download_with_ytdlp_enhanced(url, shortcode)),
             ("Direct API", lambda: download_with_requests(url, shortcode)),
             ("HTML Scraping", lambda: download_with_instaloader_like(url, shortcode)),
-            ("yt-dlp (Public)", lambda: download_with_ytdlp_public(url, shortcode)),
-            ("oEmbed", lambda: download_with_oembed(url, shortcode)),
         ]
 
         result = None
@@ -388,7 +387,7 @@ async def download(request: Request):
             return JSONResponse(
                 content={
                     "error": "Unable to download video. This might be a private post, age-restricted content, or Instagram has blocked the request. Try with a different public Instagram video.",
-                    "suggestion": "Make sure the Instagram post is:\n1. Public (not private account)\n2. Not age-restricted\n3. Not deleted\n4. Accessible without login in your browser"
+                    "suggestion": "Make sure the Instagram post is:\n1. Public (not private account)\n2. Not age-restricted\n3. Not deleted\n4. Accessible without login in your browser\n\nNote: Some videos may be blocked on hosted servers. If this persists, the video might require login to view."
                 },
                 status_code=400
             )
@@ -431,9 +430,9 @@ async def health():
     """Health check"""
     return {
         "status": "ok",
-        "service": "Instagram Downloader API (Cookie-less)",
-        "version": "2.0.0",
-        "methods": ["direct_api", "html_scraping", "ytdlp_public", "oembed"],
+        "service": "Instagram Downloader API (Enhanced)",
+        "version": "2.1.0",
+        "methods": ["ytdlp_enhanced", "direct_api", "html_scraping"],
         "timestamp": datetime.now().isoformat()
     }
 
@@ -441,10 +440,10 @@ async def health():
 async def root():
     """Root endpoint"""
     return {
-        "message": "Instagram Video Downloader API - Cookie-less Mode",
-        "version": "2.0.0",
+        "message": "Instagram Video Downloader API - Enhanced for Render",
+        "version": "2.1.0",
         "status": "running",
-        "note": "Uses multiple fallback methods to download public Instagram videos without authentication"
+        "note": "Optimized for cloud hosting with multiple fallback methods"
     }
 
 if __name__ == "__main__":
